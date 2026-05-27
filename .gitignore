@@ -1,0 +1,45 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Local RAG state
+.rag_manifest.json
+.rag_manifest*.json
+
+# Local document/library data
+uploads/
+imports/
+archives/
+documents/
+rag_library/
+RAG_LIBRARY/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Local service/artifact state
+mlruns/
+mlartifacts/
+qdrant_storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

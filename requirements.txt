@@ -1,0 +1,14 @@
+mlflow
+fastapi
+nicegui
+uvicorn
+qdrant-client
+fastembed-gpu
+nvidia-cudnn-cu12>=9,<10
+protobuf<7,>=5
+openai
+pypdf
+pydantic-settings
+langchain-text-splitters
+pytest
+httpx
