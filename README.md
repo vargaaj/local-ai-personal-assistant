@@ -1,4 +1,4 @@
-# Local RAG Service With Qdrant, Gemma4, and MLflow Tracing
+# Local RAG Service With Qdrant, Phi4-Mini, and MLflow Tracing
 
 FastAPI service for local document RAG:
 
