@@ -26,10 +26,12 @@ class QdrantStore:
         api_key: str,
         collection_name: str,
         vector_size: int,
+        score_threshold: float = 0.35,
         timeout: float = 30.0,
     ) -> None:
         self.collection_name = collection_name
         self.vector_size = vector_size
+        self.score_threshold = score_threshold
         self.client = QdrantClient(url=url, api_key=api_key, timeout=timeout)
 
     @trace
@@ -157,6 +159,7 @@ class QdrantStore:
                     query=vector,
                     limit=limit,
                     with_payload=True,
+                    score_threshold=self.score_threshold,
                 )
                 raw_points = getattr(response, "points", response)
             else:
@@ -165,6 +168,7 @@ class QdrantStore:
                     query_vector=vector,
                     limit=limit,
                     with_payload=True,
+                    score_threshold=self.score_threshold,
                 )
 
         results = []

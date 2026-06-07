@@ -126,7 +126,7 @@ def configure_mlflow(settings: Settings) -> dict[str, Any]:
         ):
             mlflow.set_tracking_uri(tracking_uri)
             mlflow.set_experiment(settings.mlflow_experiment)
-            mlflow.openai.autolog()
+            mlflow.langchain.autolog()
             _trace_enabled = True
         return {
             "configured": True,

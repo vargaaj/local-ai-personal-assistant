@@ -1,75 +1,124 @@
-# Local RAG Service With NiceGui, Qdrant, Phi4-Mini, and MLflow Tracing
+# Local AI Personal Assistant
 
-FastAPI service for local document RAG:
+Privacy-focused personal assistant built with FastAPI, NiceGUI, LangGraph, and
+local Ollama inference. It supports ordinary chat, persistent memory, live
+web search, private-document RAG, and background document-research agents.
 
-1. Parse local `.pdf`, `.md`, and `.txt` files.
-2. Chunk and embed them locally with FastEmbed.
-3. Store chunks in Qdrant.
-4. Answer questions with local Ollama `phi4-mini`.
-5. Trace ingestion, retrieval, prompt assembly, and chat calls in MLflow.
+The assistant:
+
+1. Routes questions through LangGraph to general, document, live-web, or document-research workflows.
+2. Answers ordinary questions with a local Ollama model without requiring indexed documents.
+3. Parses, chunks, and embeds local `.pdf`, `.md`, and `.txt` files with FastEmbed for private-document RAG.
+4. Stores document vectors in Qdrant and retrieves sourced document chunks when requested.
+5. Persists conversation threads, explicit saved facts, agent runs, and approvals in SQLite.
+6. Runs background document-research agents for multi-query local-document analysis.
+7. Traces ingestion, retrieval, prompts, LangGraph nodes, and model calls in MLflow.
 
 ## Setup
 
-Python Version is 3.12.0
+Python `3.12` is recommended.
 
 ```bash
 python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and set:
+PowerShell:
 
-- `QDRANT_API_KEY`
-- `RAG_DOCS_ROOT`
-- `RAG_MANIFEST_PATH=.rag_manifest.json`
-- `FASTEMBED_MODEL=mixedbread-ai/mxbai-embed-large-v1`
-- `FASTEMBED_VECTOR_SIZE=1024`
-- `FASTEMBED_CUDA=true`
-- `FASTEMBED_PROVIDERS=CUDAExecutionProvider`
-- `FASTEMBED_DEVICE_IDS=0`
-
-The app reads `.env` automatically. Real environment variables still override values in
-that file.
-
-The default MLflow tracking URI is:
-
-```text
-http://mlflow.tail.....net:5000/
+```powershell
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-When MLflow is reachable, the app loads the system prompt from the MLflow Prompt
-Registry using `MLFLOW_PROMPT_NAME` and `MLFLOW_PROMPT_ALIAS`. If the prompt does
-not exist yet, the app registers the default balanced RAG prompt and assigns the
-alias. Chat traces include the browser/API session id, configured user name,
-model, prompt version, retrieval settings, and returned source filenames.
+Set these required values in `.env`:
 
-The default embedding model is `mixedbread-ai/mxbai-embed-large-v1`, which
-uses 1024-dimensional vectors. `/ingest` with `"reset": false` skips source
-files when the local manifest shows the same file hash, Qdrant collection,
-embedding model, vector size, and chunk settings. Use `"reset": true` when you
-intentionally want to rebuild the collection.
+```text
+QDRANT_URL=https://your-qdrant-host:6333
+QDRANT_API_KEY=...
+RAG_DOCS_ROOT=C:\absolute\path\to\rag_library
+```
 
-The manifest is local app state. If you modify Qdrant outside this app, run
-`/ingest` with `"reset": true` to rebuild the collection and refresh the
-manifest.
+`RAG_DOCS_ROOT` must be an existing absolute directory before API ingestion
+starts. The UI creates its `uploads/` and `imports/` subdirectories as needed.
 
-GPU embeddings are enabled by default. Install the GPU build in the same Python
-environment used to run Uvicorn:
+Prefer an `https://` `QDRANT_URL` when the Qdrant server has TLS enabled. A
+tailnet-only `http://` Qdrant URL is still encrypted by Tailscale, but the
+Qdrant Python client cannot detect the WireGuard transport and emits an
+insecure-API-key warning. Enable Qdrant TLS and switch the URL to `https://` if
+you need to remove that warning rather than accept it for a tailnet-only
+service.
+
+Set `MLFLOW_TRACKING_URI` to your tracking server URL if you want MLflow tracing
+and prompt-registry integration. MLflow is optional and failures are non-fatal.
+
+Common optional settings:
+
+```text
+RAG_MANIFEST_PATH=.rag_manifest.json
+RAG_STATE_DB_PATH=.rag_state.sqlite3
+RETRIEVAL_SCORE_THRESHOLD=0.35
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=nemotron-3-nano:4b
+OLLAMA_API_KEY=
+AGENT_MAX_CONCURRENT_RUNS=1
+```
+
+`OLLAMA_API_KEY` enables Ollama's cloud web-search endpoint. Without it, General,
+Documents, and Research modes still work. Automatic routing falls back to General
+mode when it selects Web but no key is configured.
+
+The assistant stores LangGraph checkpoints and app metadata in
+`RAG_STATE_DB_PATH`. This local SQLite file is ignored by git. Explicit memories
+are saved only through the memory panel or `/remember <fact>` and removed through
+the panel or `/forget <id>`. Strict LangGraph msgpack serialization is enabled
+internally. Relative `RAG_MANIFEST_PATH` and `RAG_STATE_DB_PATH` values resolve
+from the directory where Uvicorn is launched, so run commands from the repository
+root or use absolute paths.
+
+Key tuning settings:
+
+| Variable | Purpose |
+| --- | --- |
+| `RAG_USER_NAME` | Personalizes local prompts and MLflow trace user metadata. |
+| `OLLAMA_MAX_TOKENS` | Sets Ollama `num_predict`. The default `192` can constrain longer answers. |
+| `FASTEMBED_BATCH_SIZE` | Controls local document-embedding batch size. |
+| `CHUNK_SIZE` | Sets the text-splitter chunk size. |
+| `CHUNK_OVERLAP` | Sets text overlap between chunks. Keep it smaller than `CHUNK_SIZE`. |
+| `RETRIEVAL_SCORE_THRESHOLD` | Filters weak cosine-similarity matches before local synthesis. |
+| `MEMORY_FACT_LIMIT` | Bounds the explicit saved facts included in local prompts. |
+| `WEB_SEARCH_MAX_RESULTS` | Limits Ollama cloud web-search results. Supported range: `1` to `10`. |
+| `RESEARCH_QUERY_COUNT` | Limits local-document queries generated by a research run. |
+| `AGENT_MAX_CONCURRENT_RUNS` | Limits in-process background-agent worker threads. |
+
+## Ollama
+
+Start Ollama and pull the configured model:
+
+```bash
+ollama --version
+ollama pull nemotron-3-nano:4b
+ollama serve
+```
+
+`OLLAMA_BASE_URL` should be the root URL, normally `http://localhost:11434`.
+Existing `/v1` values are normalized automatically.
+
+On Windows, the Ollama desktop application may already run its background
+service. If port `11434` is already in use and `http://localhost:11434/api/tags`
+responds, do not start a second `ollama serve` process. Restart Uvicorn after
+changing `.env`; the application loads settings during startup.
+
+## Embeddings
+
+The default embedding model is `mixedbread-ai/mxbai-embed-large-v1`, which uses
+1024-dimensional vectors. GPU embeddings are enabled by default.
 
 ```bash
 python -m pip uninstall -y fastembed onnxruntime
 python -m pip install -r requirements.txt
 ```
 
-The app also preloads CUDA/cuDNN libraries installed from the NVIDIA Python
-wheels before FastEmbed initializes ONNX Runtime. This prevents silent CPU
-fallback when GPU embeddings are enabled.
-
-Runtime timing logs are emitted for MLflow setup, embedding, retrieval, Qdrant
-upserts/searches, and Ollama generation. They are useful for identifying where
-slow `/chat` requests are spending time.
-
-Verify CUDA is available before ingesting:
+Verify the environment before ingesting:
 
 ```bash
 python - <<'PY'
@@ -78,48 +127,146 @@ print(ort.get_available_providers())
 PY
 ```
 
-The output must include `CUDAExecutionProvider`.
+The output must include `CUDAExecutionProvider` when GPU embeddings are enabled.
 
-## Ollama
+PowerShell:
 
-The planned chat model is `phi4-mini`. If your Ollama version is too old for that model, upgrade Ollama first, then pull it:
+```powershell
+python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
 
-```bash
-ollama --version
-ollama pull <model-name>
-ollama serve # (serves model so we can hit the endpoint)
+To run embeddings on CPU instead, set:
+
+```text
+FASTEMBED_CUDA=false
+FASTEMBED_PROVIDERS=
+FASTEMBED_DEVICE_IDS=
 ```
 
 ## Run
 
-# Starts the server
+Run from the repository root:
 
 ```bash
 PYTHONPATH=src python -m uvicorn rag_app.main:app --host 0.0.0.0 --port 8001
 ```
 
-Browser chat:
+PowerShell:
 
-```text
-http://127.0.0.1:8001/
+```powershell
+$env:PYTHONPATH = "src"
+python -m uvicorn rag_app.main:app --host 0.0.0.0 --port 8001
 ```
 
-The browser UI is built with NiceGUI. It keeps the existing JSON API routes and
-adds a document panel for uploading `.pdf`, `.md`, `.txt`, and `.zip` files.
-Uploaded documents are saved under `RAG_DOCS_ROOT/uploads/`; zip archives are
-extracted under `RAG_DOCS_ROOT/imports/`. Both paths are indexed with the same
-ingest flow used by `/ingest`.
+Open `http://127.0.0.1:8001/`.
 
-Health:
+The NiceGUI page provides:
 
-```bash
-curl http://localhost:8001/health
-```
+- Persistent conversation threads with create, reload, and delete controls.
+- `auto`, `general`, `documents`, `web`, and `research` chat modes.
+- Upload and ingestion controls for `.pdf`, `.md`, `.txt`, and `.zip`.
+- Explicit saved-memory management.
+- Background document-research runs with status, cancellation, and deletion.
+- Approval cards for future mutating agents with approve, edit, and reject actions.
+
+Chat modes intentionally keep local and outbound context separate:
+
+| Mode | Behavior |
+| --- | --- |
+| `general` | Answers locally from the Ollama model, up to the latest 24 messages in the active thread, and bounded explicit saved facts. It does not query Qdrant or the web. |
+| `documents` | Retrieves Qdrant chunks for the current question and synthesizes locally with explicit saved facts. It does not send document text to web search. |
+| `web` | Sends the exact current question to Ollama cloud web search and synthesizes returned snippets locally. It does not include thread history, saved facts, or document text in the search query. Include location or other required context in the current question. |
+| `research` | Queues a read-only, multi-query local-document research run and immediately returns a run ID. It does not use web search. |
+| `auto` | Uses the local model to select one of the routes above. |
+
+The JSON API exposes:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Report Qdrant, Ollama, MLflow, web-search, and agent configuration status. |
+| `POST` | `/ingest` | Incrementally ingest documents or reset and rebuild the collection. |
+| `POST` | `/chat` | Chat with an optional thread ID and explicit mode. |
+| `POST`, `GET` | `/threads` | Create or list persistent threads. |
+| `GET`, `DELETE` | `/threads/{thread_id}` | Load or delete a thread. |
+| `GET`, `POST` | `/memory` | List or create explicit saved facts. |
+| `DELETE` | `/memory/{fact_id}` | Delete a saved fact. |
+| `GET`, `POST` | `/agents/runs` | List or launch background agent runs. |
+| `GET`, `DELETE` | `/agents/runs/{run_id}` | Inspect or delete an agent run. |
+| `POST` | `/agents/runs/{run_id}/cancel` | Request cooperative cancellation. |
+| `POST` | `/agents/runs/{run_id}/approval` | Approve, edit, or reject a pending future mutating-agent action. |
+
+Interactive API documentation is available at `http://127.0.0.1:8001/docs`.
+Uploads are NiceGUI-only; there is no JSON upload endpoint.
+
+For a walkthrough of the graphs, state model, persistence, privacy boundaries,
+background research agent, and extension points, see
+[`LANGGRAPH_ARCHITECTURE.md`](LANGGRAPH_ARCHITECTURE.md).
+
+## Ingestion
+
+`POST /ingest` with `"reset": false` skips unchanged source files when the local
+manifest matches the file hash, Qdrant collection, embedding model, vector size,
+and chunk settings. It also removes Qdrant chunks for local files that were
+deleted. Use `"reset": true` to rebuild the collection.
+
+`RETRIEVAL_SCORE_THRESHOLD` filters weak cosine-similarity matches before they
+are provided to the local model. Adjust it if your embedding model needs a
+different relevance cutoff.
+
+Uploaded documents are saved under `RAG_DOCS_ROOT/uploads/`. Zip archives are
+extracted under `RAG_DOCS_ROOT/imports/`. UI uploads are indexed automatically.
+Each uploaded file is limited to 50 MB. Zip archives may expand to at most 500 MB
+and only `.pdf`, `.md`, and `.txt` entries are extracted.
+
+`"reset": true` deletes and recreates the configured Qdrant collection. Use it
+after Qdrant is modified outside this application. Incremental ingestion updates
+changed files and removes chunks for source files that no longer exist under
+`RAG_DOCS_ROOT`.
+
+## MLflow
+
+The default MLflow tracking URI is configured through `MLFLOW_TRACKING_URI`.
+When MLflow is reachable, the app registers separate prompt-registry entries for:
+
+- Router
+- General answer
+- Document answer
+- Web answer
+- Research planner
+- Research synthesis
+
+The app enables MLflow LangChain autologging in addition to its existing manual
+traces. MLflow remains optional: startup continues when the tracking server is
+unavailable.
 
 ## Tests
 
 ```bash
-pytest
+python -m pytest -q
 ```
 
-Live service tests are intentionally not run by default. Use `RUN_LIVE_TESTS=1` only after configuring Qdrant, Ollama, and MLflow.
+The opt-in live health smoke check imports the app and calls `/health`. It
+confirms the configured stack can be inspected, but it intentionally accepts a
+degraded `503` response and does not verify ingestion, web search, or successful
+MLflow trace delivery.
+
+```bash
+RUN_LIVE_TESTS=1 python -m pytest -q tests/test_live_smoke.py
+```
+
+PowerShell:
+
+```powershell
+$env:RUN_LIVE_TESTS = "1"
+python -m pytest -q tests/test_live_smoke.py
+```
+
+To verify configured web search separately, run the service and submit an
+explicit Web-mode request:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8001/chat `
+  -ContentType "application/json" `
+  -Body '{"question":"What is the current weather in New York, NY?","mode":"web"}'
+```

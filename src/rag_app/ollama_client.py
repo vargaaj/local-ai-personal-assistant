@@ -1,11 +1,23 @@
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, TypeVar
 
-from openai import OpenAI
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_ollama import ChatOllama
+from pydantic import BaseModel
 
 from .errors import ServiceUnavailableError
 from .tracing import timed, trace
+
+StructuredOutput = TypeVar("StructuredOutput", bound=BaseModel)
+
+
+def normalize_ollama_base_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/v1"):
+        normalized = normalized[:-3]
+    return normalized.rstrip("/")
 
 
 class OllamaChatClient:
@@ -18,19 +30,37 @@ class OllamaChatClient:
         system_prompt: str,
         system_prompt_metadata: dict[str, str] | None = None,
     ) -> None:
-        self.base_url = base_url
+        self.base_url = normalize_ollama_base_url(base_url)
         self.model = model
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt
         self.system_prompt_metadata = system_prompt_metadata or {}
-        self.client = OpenAI(base_url=base_url, api_key="ollama")
+        self.client = ChatOllama(
+            base_url=self.base_url,
+            model=model,
+            num_predict=max_tokens,
+            temperature=0.1,
+        )
 
     @trace
     def health(self) -> dict[str, Any]:
         try:
+            from ollama import Client
+
             with timed("ollama.health", model=self.model):
-                models = self.client.models.list()
-            available = sorted(model.id for model in models.data)
+                response = Client(host=self.base_url).list()
+            raw_models = getattr(response, "models", None)
+            if raw_models is None and isinstance(response, dict):
+                raw_models = response.get("models", [])
+            available = sorted(
+                str(
+                    getattr(item, "model", None)
+                    or getattr(item, "name", None)
+                    or (item.get("model") if isinstance(item, dict) else "")
+                    or (item.get("name") if isinstance(item, dict) else "")
+                )
+                for item in (raw_models or [])
+            )
             return {
                 "ok": self.model in available,
                 "base_url": self.base_url,
@@ -59,20 +89,35 @@ class OllamaChatClient:
 
     @trace
     def chat(self, user_prompt: str) -> str:
+        return self.chat_messages(
+            [
+                SystemMessage(content=self.system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+        )
+
+    @trace
+    def chat_messages(self, messages: Sequence[BaseMessage]) -> str:
         self.assert_model_available()
         with timed(
-            "ollama.chat_completion",
+            "ollama.chat",
             model=self.model,
-            prompt_chars=len(user_prompt),
+            messages=len(messages),
             max_tokens=self.max_tokens,
         ):
-            response = self.client.chat.completions.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=0.1,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-        return response.choices[0].message.content or ""
+            response = self.client.invoke(list(messages))
+        return str(response.content or "")
+
+    @trace
+    def structured_output(
+        self,
+        messages: Sequence[BaseMessage],
+        schema: type[StructuredOutput],
+    ) -> StructuredOutput:
+        self.assert_model_available()
+        with timed("ollama.structured_output", model=self.model, schema=schema.__name__):
+            structured_client = self.client.with_structured_output(schema)
+            result = structured_client.invoke(list(messages))
+        if isinstance(result, schema):
+            return result
+        return schema.model_validate(result)

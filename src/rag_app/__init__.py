@@ -1,4 +1,8 @@
-"""Local RAG service with Qdrant, Ollama, and MLflow tracing."""
+"""Local AI personal assistant with private-document RAG."""
+
+import os
+
+os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
 
 __all__ = ["__version__"]
 

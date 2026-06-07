@@ -83,6 +83,9 @@ class IngestManifest:
         self._records.clear()
         self.save()
 
+    def sources(self) -> set[str]:
+        return set(self._records)
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {

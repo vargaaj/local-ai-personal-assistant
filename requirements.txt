@@ -6,7 +6,11 @@ qdrant-client
 fastembed-gpu
 nvidia-cudnn-cu12>=9,<10
 protobuf<7,>=5
-openai
+langchain>=1.2,<=1.2.9
+langchain-ollama>=1.1,<2
+langgraph>=1.0.7,<1.1
+langgraph-checkpoint-sqlite>=3.1,<4
+ollama>=0.6,<0.7
 pypdf
 pydantic-settings
 langchain-text-splitters

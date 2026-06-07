@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import uuid4
 from collections.abc import Callable
 from functools import partial
@@ -28,7 +29,7 @@ def register_nicegui_ui(
     @ui.page("/")
     def chat_page() -> None:
         session_id = f"nicegui-{uuid4().hex}"
-        ui.page_title("Local RAG Chat")
+        ui.page_title("Local AI Personal Assistant")
         ui.colors(primary="#0f766e", secondary="#64748b", accent="#0f766e")
         _add_styles(ui)
 
@@ -37,12 +38,12 @@ def register_nicegui_ui(
             "border-slate-200 px-5"
         ):
             with ui.row().classes("items-center gap-3"):
-                ui.label("RAG").classes(
+                ui.label("AI").classes(
                     "bg-primary text-white font-bold rounded-lg px-3 py-2"
                 )
                 with ui.column().classes("gap-0"):
-                    ui.label("Local RAG Chat").classes("text-lg font-semibold")
-                    ui.label("Qdrant, Ollama, FastEmbed, MLflow").classes(
+                    ui.label("Local AI Personal Assistant").classes("text-lg font-semibold")
+                    ui.label("LangGraph, Qdrant, Ollama, FastEmbed, MLflow").classes(
                         "text-xs text-slate-500"
                     )
             status_chip = ui.chip("Checking", icon="radio_button_unchecked").props(
@@ -50,12 +51,21 @@ def register_nicegui_ui(
             )
 
         with ui.row().classes("rag-page w-full no-wrap"):
+            with ui.column().classes("thread-panel"):
+                with ui.card().classes("tool-card"):
+                    with ui.row().classes("items-center justify-between w-full"):
+                        ui.label("Threads").classes("card-title")
+                        new_thread_button = ui.button(icon="add").props("flat dense")
+                    thread_list = ui.column().classes("gap-1 w-full")
+                    delete_thread_button = ui.button(
+                        "Delete selected",
+                        icon="delete_outline",
+                    ).props("outline color=negative").classes("w-full")
+
             with ui.column().classes("chat-panel"):
                 messages = ui.column().classes("message-list")
                 with messages:
-                    empty_state = ui.label(
-                        "Ask a question about your indexed local documents."
-                    ).classes("empty-state")
+                    ui.label("Ask a question to start this thread.").classes("empty-state")
 
                 with ui.row().classes("composer-row"):
                     question = (
@@ -67,6 +77,15 @@ def register_nicegui_ui(
                         ui.number("Top K", value=4, min=1, max=20)
                         .props("outlined dense")
                         .classes("top-k-input")
+                    )
+                    mode = (
+                        ui.select(
+                            ["auto", "general", "documents", "web", "research"],
+                            value="auto",
+                            label="Mode",
+                        )
+                        .props("outlined dense")
+                        .classes("mode-input")
                     )
                     send_button = ui.button("Send", icon="send").classes(
                         "send-button"
@@ -125,8 +144,180 @@ def register_nicegui_ui(
                             "text-sm text-slate-500"
                         )
 
+                with ui.card().classes("tool-card"):
+                    ui.label("Saved Memory").classes("card-title")
+                    memory_input = ui.input(placeholder="Add an explicit saved fact").props(
+                        "outlined dense"
+                    ).classes("w-full")
+                    add_memory_button = ui.button("Remember", icon="bookmark_add").props(
+                        "outline"
+                    ).classes("w-full")
+                    memory_list = ui.column().classes("gap-2 w-full")
+
+                with ui.card().classes("tool-card"):
+                    with ui.row().classes("items-center justify-between w-full"):
+                        ui.label("Agent Runs").classes("card-title")
+                        refresh_runs_button = ui.button(icon="refresh").props("flat dense")
+                    run_list = ui.column().classes("gap-2 w-full")
+
         busy = {"chat": False, "ingest": False}
         ingest_lock = asyncio.Lock()
+        current_thread = {"id": None}
+
+        async def select_thread(thread_id: str) -> None:
+            current_thread["id"] = thread_id
+            try:
+                detail = await run.io_bound(lambda: get_service().get_thread(thread_id))
+            except Exception as exc:
+                ui.notify(_format_error(exc), type="negative")
+                return
+            _replace(messages, lambda: _thread_messages(ui, detail.messages if detail else []))
+            await refresh_threads()
+            await refresh_runs()
+
+        async def refresh_threads() -> None:
+            try:
+                threads = await run.io_bound(lambda: get_service().list_threads())
+            except Exception as exc:
+                _replace(thread_list, lambda: _health_error(ui, exc))
+                return
+            _replace(
+                thread_list,
+                lambda: _thread_rows(
+                    ui,
+                    threads,
+                    current_thread["id"],
+                    select_thread,
+                ),
+            )
+
+        async def start_new_thread() -> None:
+            current_thread["id"] = None
+            question.value = ""
+            _replace(messages, lambda: _thread_messages(ui, []))
+            _replace(
+                source_list,
+                lambda: ui.label(
+                    "Sources from the latest answer will appear here."
+                ).classes("text-sm text-slate-500"),
+            )
+            await refresh_threads()
+            await refresh_runs()
+
+        async def delete_thread() -> None:
+            thread_id = current_thread["id"]
+            if not thread_id:
+                return
+            try:
+                await run.io_bound(lambda: get_service().delete_thread(thread_id))
+            except Exception as exc:
+                ui.notify(_format_error(exc), type="negative")
+                return
+            current_thread["id"] = None
+            try:
+                threads = await run.io_bound(lambda: get_service().list_threads())
+            except Exception:
+                await start_new_thread()
+                return
+            if threads:
+                await select_thread(threads[0].id)
+            else:
+                await start_new_thread()
+
+        async def refresh_memory() -> None:
+            try:
+                facts = await run.io_bound(lambda: get_service().list_memory_facts())
+            except Exception as exc:
+                _replace(memory_list, lambda: _health_error(ui, exc))
+                return
+            _replace(memory_list, lambda: _memory_rows(ui, facts, delete_memory))
+
+        async def add_memory() -> None:
+            content = str(memory_input.value or "").strip()
+            if not content:
+                ui.notify("Enter a fact to remember.", type="warning")
+                return
+            try:
+                await run.io_bound(lambda: get_service().add_memory_fact(content))
+            except Exception as exc:
+                ui.notify(_format_error(exc), type="negative")
+                return
+            memory_input.value = ""
+            await refresh_memory()
+
+        async def delete_memory(fact_id: str) -> None:
+            try:
+                await run.io_bound(lambda: get_service().delete_memory_fact(fact_id))
+            except Exception as exc:
+                ui.notify(_format_error(exc), type="negative")
+                return
+            await refresh_memory()
+
+        async def refresh_runs() -> None:
+            if not current_thread["id"]:
+                _replace(
+                    run_list,
+                    lambda: ui.label("No saved thread selected.").classes(
+                        "text-sm text-slate-500"
+                    ),
+                )
+                return
+            try:
+                runs = await run.io_bound(
+                    lambda: get_service().list_agent_runs(thread_id=current_thread["id"])
+                )
+            except Exception as exc:
+                _replace(run_list, lambda: _health_error(ui, exc))
+                return
+            _replace(run_list, lambda: _run_rows(ui, runs, cancel_run, delete_run, decide_run))
+            if any(item.state == "completed" for item in runs):
+                thread_id = current_thread["id"]
+                if thread_id:
+                    detail = await run.io_bound(lambda: get_service().get_thread(thread_id))
+                    _replace(messages, lambda: _thread_messages(ui, detail.messages if detail else []))
+
+        async def cancel_run(run_id: str) -> None:
+            try:
+                await run.io_bound(lambda: get_service().cancel_agent_run(run_id))
+            except Exception as exc:
+                ui.notify(_format_error(exc), type="negative")
+            await refresh_runs()
+
+        async def delete_run(run_id: str) -> None:
+            try:
+                await run.io_bound(lambda: get_service().delete_agent_run(run_id))
+            except Exception as exc:
+                ui.notify(_format_error(exc), type="negative")
+            await refresh_runs()
+
+        async def decide_run(
+            run_id: str,
+            decision: str,
+            edited_payload: dict[str, Any] | None = None,
+        ) -> None:
+            try:
+                await run.io_bound(
+                    lambda: get_service().decide_agent_approval(
+                        run_id,
+                        decision=decision,
+                        edited_payload=edited_payload,
+                    )
+                )
+            except Exception as exc:
+                ui.notify(_format_error(exc), type="negative")
+            await refresh_runs()
+
+        async def initialize_page() -> None:
+            await refresh_health()
+            await refresh_memory()
+            try:
+                threads = await run.io_bound(lambda: get_service().list_threads())
+            except Exception:
+                return
+            if threads:
+                await select_thread(threads[0].id)
+            else:
+                await start_new_thread()
 
         async def refresh_health() -> None:
             status_chip.set_text("Checking")
@@ -156,6 +347,7 @@ def register_nicegui_ui(
             if not text:
                 ui.notify("Enter a question first.", type="warning")
                 return
+            memory_command = text.lower().startswith(("/remember", "/forget"))
 
             try:
                 limit = int(top_k.value or 4)
@@ -165,7 +357,6 @@ def register_nicegui_ui(
             top_k.value = limit
             question.value = ""
 
-            empty_state.visible = False
             _chat_message(ui, messages, text, name="You", sent=True)
             pending = _chat_message(ui, messages, "Thinking...", name="Assistant")
             _replace(source_list, lambda: ui.label("Waiting for answer...").classes(
@@ -180,6 +371,8 @@ def register_nicegui_ui(
                         question=text,
                         top_k=limit,
                         session_id=session_id,
+                        thread_id=current_thread["id"],
+                        mode=str(mode.value or "auto"),
                     )
                 )
             except Exception as exc:
@@ -189,9 +382,16 @@ def register_nicegui_ui(
                 pending.delete()
                 _chat_message(ui, messages, response.answer, name="Assistant")
                 _replace(source_list, lambda: _source_rows(ui, response.sources))
+                current_thread["id"] = response.thread_id
+                for warning in response.warnings:
+                    ui.notify(warning, type="warning")
             finally:
                 busy["chat"] = False
                 send_button.enable()
+                if memory_command:
+                    await refresh_memory()
+                await refresh_threads()
+                await refresh_runs()
 
         async def run_ingest(*, reset: bool) -> None:
             if ingest_lock.locked():
@@ -252,9 +452,14 @@ def register_nicegui_ui(
         reset_button.on_click(partial(run_ingest, reset=True))
         health_button.on_click(refresh_health)
         uploader.on_upload(handle_upload)
-        ui.timer(0.1, refresh_health, once=True)
+        new_thread_button.on_click(start_new_thread)
+        delete_thread_button.on_click(delete_thread)
+        add_memory_button.on_click(add_memory)
+        refresh_runs_button.on_click(refresh_runs)
+        ui.timer(0.1, initialize_page, once=True)
+        ui.timer(3.0, refresh_runs)
 
-    ui.run_with(fastapi_app, title="Local RAG Chat")
+    ui.run_with(fastapi_app, title="Local AI Personal Assistant")
 
 
 def _add_styles(ui: Any) -> None:
@@ -276,6 +481,16 @@ def _add_styles(ui: Any) -> None:
           border-radius: 8px;
           background: white;
           overflow: hidden;
+        }
+        .thread-panel {
+          width: 250px;
+          min-width: 220px;
+          height: 100%;
+          overflow-y: auto;
+        }
+        .thread-separator {
+          margin: 4px 0;
+          background-color: #e2e8f0;
         }
         .message-list {
           flex: 1 1 auto;
@@ -304,6 +519,9 @@ def _add_styles(ui: Any) -> None:
         }
         .top-k-input {
           width: 96px;
+        }
+        .mode-input {
+          width: 130px;
         }
         .send-button {
           height: 48px;
@@ -341,6 +559,11 @@ def _add_styles(ui: Any) -> None:
           .chat-panel {
             height: 70vh;
             flex-basis: 100%;
+          }
+          .thread-panel {
+            width: 100%;
+            min-width: 0;
+            height: auto;
           }
           .side-panel {
             width: 100%;
@@ -404,12 +627,138 @@ def _source_rows(ui: Any, sources: list[Any]) -> None:
         return
     for source in sources:
         with ui.column().classes("source-row gap-1"):
-            ui.label(source.filename).classes("text-sm font-semibold text-slate-800")
-            ui.label(f"Chunk {source.chunk_index}").classes("text-xs text-slate-500")
+            label = source.title or source.filename or source.source
+            ui.label(label).classes("text-sm font-semibold text-slate-800")
+            if source.kind == "web" and source.url:
+                ui.link(source.url, source.url, new_tab=True).classes(
+                    "text-xs text-primary break-all"
+                )
+            elif source.filename:
+                ui.label(f"Chunk {source.chunk_index}").classes("text-xs text-slate-500")
             if source.score is not None:
                 ui.label(f"Score {source.score:.3f}").classes("text-xs text-slate-500")
             if source.snippet:
                 ui.label(source.snippet).classes("text-xs text-slate-600")
+
+
+def _thread_rows(
+    ui: Any,
+    threads: list[Any],
+    selected_id: str | None,
+    select_thread: Callable[[str], Any],
+) -> None:
+    if not threads:
+        ui.label("No saved threads.").classes("text-sm text-slate-500")
+        return
+    for index, thread in enumerate(threads):
+        if index:
+            ui.separator().classes("thread-separator")
+        props = "flat align=left"
+        if thread.id == selected_id:
+            props += " color=primary"
+        ui.button(
+            thread.title,
+            on_click=partial(select_thread, thread.id),
+        ).props(props).classes("w-full")
+
+
+def _thread_messages(ui: Any, messages: list[Any]) -> None:
+    if not messages:
+        ui.label("Ask a question to start this thread.").classes("empty-state")
+        return
+    for message in messages:
+        if message.role not in {"user", "assistant"}:
+            continue
+        ui.chat_message(
+            message.content,
+            name="You" if message.role == "user" else "Assistant",
+            sent=message.role == "user",
+        ).classes("w-full")
+
+
+def _memory_rows(ui: Any, facts: list[Any], delete_memory: Callable[[str], Any]) -> None:
+    if not facts:
+        ui.label("No explicit saved facts.").classes("text-sm text-slate-500")
+        return
+    for fact in facts:
+        with ui.row().classes("source-row items-start justify-between w-full no-wrap"):
+            with ui.column().classes("gap-1 min-w-0"):
+                ui.label(fact.content).classes("text-xs text-slate-700")
+                ui.label(f"ID: {fact.id}").classes("text-[11px] text-slate-500 break-all")
+            ui.button(icon="delete_outline", on_click=partial(delete_memory, fact.id)).props(
+                "flat dense color=negative"
+            )
+
+
+def _run_rows(
+    ui: Any,
+    runs: list[Any],
+    cancel_run: Callable[[str], Any],
+    delete_run: Callable[[str], Any],
+    decide_run: Callable[[str, str], Any],
+) -> None:
+    if not runs:
+        ui.label("No agent runs for this thread.").classes("text-sm text-slate-500")
+        return
+    for run in runs:
+        with ui.column().classes("source-row gap-1"):
+            ui.label(f"{run.agent_name}: {run.state}").classes(
+                "text-sm font-semibold text-slate-800"
+            )
+            ui.label(run.task).classes("text-xs text-slate-600")
+            if run.error:
+                ui.label(run.error).classes("text-xs text-red-700")
+            if run.sources:
+                names = [
+                    source.filename or source.title or source.url or source.source
+                    for source in run.sources
+                ]
+                ui.label(f"Sources: {', '.join(name for name in names if name)}").classes(
+                    "text-xs text-slate-500"
+                )
+            if run.approval and run.approval.state == "pending":
+                ui.label(str(run.approval.payload)).classes("text-xs text-amber-700")
+                edited_payload = ui.textarea(
+                    value=json.dumps(run.approval.payload, indent=2),
+                    label="Edit approval payload",
+                ).props("outlined dense").classes("w-full")
+                with ui.row().classes("gap-1"):
+                    ui.button("Approve", on_click=partial(decide_run, run.id, "approve")).props(
+                        "outline dense color=positive"
+                    )
+                    ui.button(
+                        "Edit and approve",
+                        on_click=partial(_submit_edit, ui, decide_run, run.id, edited_payload),
+                    ).props("outline dense")
+                    ui.button("Reject", on_click=partial(decide_run, run.id, "reject")).props(
+                        "outline dense color=negative"
+                    )
+            with ui.row().classes("gap-1"):
+                if run.state in {"queued", "running", "awaiting_approval"}:
+                    ui.button("Cancel", on_click=partial(cancel_run, run.id)).props(
+                        "flat dense color=negative"
+                    )
+                else:
+                    ui.button("Delete", on_click=partial(delete_run, run.id)).props(
+                        "flat dense color=negative"
+                    )
+
+
+async def _submit_edit(
+    ui: Any,
+    decide_run: Callable[[str, str, dict[str, Any] | None], Any],
+    run_id: str,
+    input_element: Any,
+) -> None:
+    try:
+        payload = json.loads(str(input_element.value or "{}"))
+    except json.JSONDecodeError as exc:
+        ui.notify(f"Approval payload must be valid JSON: {exc}", type="warning")
+        return
+    if not isinstance(payload, dict):
+        ui.notify("Approval payload must be a JSON object.", type="warning")
+        return
+    await decide_run(run_id, "edit", payload)
 
 
 def _format_error(exc: Exception) -> str:
