@@ -21,6 +21,51 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "me, my, or myself, interpret the user as {{user_name}}."
 )
 
+GENERAL_SYSTEM_PROMPT_TEMPLATE = (
+    "You are a helpful personal assistant for {{user_name}}. Answer normal "
+    "questions directly from your available knowledge and the conversation. "
+    "Use saved facts only when relevant. If the user asks for current external "
+    "information and no web results are provided, say that live web lookup is "
+    "needed. Do not claim that local documents were consulted unless document "
+    "context is present."
+)
+
+WEB_SYSTEM_PROMPT_TEMPLATE = (
+    "You answer using the provided live web search snippets. Cite relevant URLs "
+    "inline. State uncertainty when the snippets are incomplete or conflicting. "
+    "Do not invent details that are absent from the search results."
+)
+
+ROUTER_SYSTEM_PROMPT_TEMPLATE = (
+    "Classify the user's request into exactly one mode: general, documents, "
+    "web, or research. Use documents for questions likely answered by the "
+    "user's indexed local files. Use research for complex local-document "
+    "questions requiring several searches or a broad synthesis. Use web for "
+    "explicitly current, latest, external, or internet-related questions. Use "
+    "general for ordinary conversation and stable general knowledge."
+)
+
+RESEARCH_PLANNER_PROMPT_TEMPLATE = (
+    "Create concise local-document search queries for the user's research task. "
+    "Return queries that cover distinct aspects of the task without using web "
+    "search."
+)
+
+RESEARCH_SYNTHESIS_PROMPT_TEMPLATE = (
+    "Synthesize a sourced answer to the research task from the retrieved local "
+    "document context. Cite relevant filenames. Separate direct evidence from "
+    "inferences and state when the documents are insufficient."
+)
+
+PROMPT_TEMPLATES = {
+    "documents": DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+    "general": GENERAL_SYSTEM_PROMPT_TEMPLATE,
+    "web": WEB_SYSTEM_PROMPT_TEMPLATE,
+    "router": ROUTER_SYSTEM_PROMPT_TEMPLATE,
+    "research-planner": RESEARCH_PLANNER_PROMPT_TEMPLATE,
+    "research-synthesis": RESEARCH_SYNTHESIS_PROMPT_TEMPLATE,
+}
+
 
 @dataclass(frozen=True)
 class SystemPrompt:
@@ -60,6 +105,92 @@ def build_system_prompt(
     return template.replace("{{user_name}}", name)
 
 
+@dataclass(frozen=True)
+class PromptBundle:
+    prompts: dict[str, str]
+    metadata: dict[str, str]
+
+    def get(self, role: str) -> str:
+        return self.prompts[role]
+
+
+def resolve_prompt_bundle(
+    *,
+    user_name: str,
+    prompt_name: str,
+    prompt_alias: str,
+    registry_enabled: bool,
+) -> PromptBundle:
+    prompts = {}
+    metadata: dict[str, str] = {}
+    for role, template in PROMPT_TEMPLATES.items():
+        resolved = resolve_role_prompt(
+            user_name=user_name,
+            prompt_name=f"{prompt_name}-{role}",
+            prompt_alias=prompt_alias,
+            registry_enabled=registry_enabled,
+            template=template,
+            role=role,
+        )
+        prompts[role] = resolved.content
+        metadata.update(
+            {
+                f"rag.prompt.{role}.{key.removeprefix('rag.prompt.')}": value
+                for key, value in resolved.trace_metadata().items()
+            }
+        )
+    return PromptBundle(prompts=prompts, metadata=metadata)
+
+
+def resolve_role_prompt(
+    *,
+    user_name: str,
+    prompt_name: str,
+    prompt_alias: str,
+    registry_enabled: bool,
+    template: str,
+    role: str,
+) -> SystemPrompt:
+    if not registry_enabled:
+        return SystemPrompt(
+            content=build_system_prompt(user_name=user_name, template=template),
+            name=prompt_name,
+            alias=prompt_alias,
+            source="fallback",
+        )
+
+    try:
+        import mlflow
+
+        prompt = _load_or_create_prompt(
+            mlflow,
+            prompt_name=prompt_name,
+            prompt_alias=prompt_alias,
+            template=template,
+            role=role,
+        )
+        content = prompt.format(user_name=user_name)
+        if not isinstance(content, str):
+            raise ValueError("System prompt must resolve to a text prompt.")
+        return SystemPrompt(
+            content=content,
+            name=prompt.name,
+            alias=prompt_alias,
+            version=str(prompt.version),
+            uri=getattr(prompt, "uri", None),
+            source="mlflow",
+        )
+    except Exception as exc:
+        logger.warning("Falling back to local %s prompt: %s", role, exc)
+        return SystemPrompt(
+            content=build_system_prompt(user_name=user_name, template=template),
+            name=prompt_name,
+            alias=prompt_alias,
+            source="fallback",
+            error=str(exc),
+        )
+
+
 def resolve_system_prompt(
     *,
     user_name: str,
@@ -82,6 +213,8 @@ def resolve_system_prompt(
             mlflow,
             prompt_name=prompt_name,
             prompt_alias=prompt_alias,
+            template=DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+            role="documents",
         )
         content = prompt.format(user_name=user_name)
         if not isinstance(content, str):
@@ -110,9 +243,11 @@ def _load_or_create_prompt(
     *,
     prompt_name: str,
     prompt_alias: str,
+    template: str,
+    role: str,
 ) -> Any:
     prompt_uri = f"prompts:/{prompt_name}@{prompt_alias}"
-    prompt = mlflow.load_prompt(
+    prompt = mlflow.genai.load_prompt(
         prompt_uri,
         allow_missing=True,
         cache_ttl_seconds=0,
@@ -120,16 +255,16 @@ def _load_or_create_prompt(
     if prompt is not None:
         return prompt
 
-    prompt = mlflow.register_prompt(
+    prompt = mlflow.genai.register_prompt(
         name=prompt_name,
-        template=DEFAULT_SYSTEM_PROMPT_TEMPLATE,
-        commit_message="Initial balanced local RAG system prompt.",
+        template=template,
+        commit_message=f"Initial local assistant {role} prompt.",
         tags={
-            "app": "local-rag",
-            "prompt_role": "system",
+            "app": "local-ai-assistant",
+            "prompt_role": role,
         },
     )
-    mlflow.set_prompt_alias(prompt_name, prompt_alias, int(prompt.version))
+    mlflow.genai.set_prompt_alias(prompt_name, prompt_alias, int(prompt.version))
     return prompt
 
 
@@ -149,3 +284,15 @@ def build_user_prompt(question: str, results: list[SearchResult]) -> str:
         f"{context if context else 'No retrieved context.'}\n\n"
         f"Question:\n{question}"
     )
+
+
+def build_web_user_prompt(question: str, results: list[dict[str, str]]) -> str:
+    blocks = []
+    for index, result in enumerate(results, start=1):
+        blocks.append(
+            f"[{index}] {result.get('title', 'Untitled')}\n"
+            f"URL: {result.get('url', '')}\n"
+            f"{result.get('content', '')}"
+        )
+    context = "\n\n".join(blocks).strip() or "No web search results."
+    return f"Web search results:\n{context}\n\nQuestion:\n{question}"
